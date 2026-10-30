@@ -19,6 +19,8 @@ Don't report a scene as done without having looked at its rendered frames.
   `import foo from './scenes/foo?scene';`.
 - Render just the scene you are working on with `--scene <name>` (the file name
   without extension).
+- The first render or editor load creates `scenes/<name>.meta` (time events,
+  seed). It belongs with the scene.
 - The template is a maintainer playground. Unless asked, don't commit scene
   changes. For documentation examples, use `packages/examples` instead (see its
   AGENTS.md).
@@ -45,7 +47,8 @@ Review the sheet first; it shows the whole animation in one image. Then open
 individual frames for detail. To check timing precisely, raise the fps; to check
 fine detail, raise the scale to 1. Pass `--video` (with `--fps 30`) to write
 `<scene>.mp4` for the user to watch; it uses `hevc_nvenc` and falls back to
-`libx264`.
+`libx264`. Preview videos are half resolution and look soft; for a user judging
+quality, use `--scale 1` or `--final`.
 
 `--final` renders an upload master instead: 4K (scale 2), 60 fps, 10-bit HEVC at
 `-cq 16`, no sheet. Use it for YouTube even when the target is 1080p, since
@@ -59,6 +62,14 @@ Rendering rewrites `packages/template/src/*.meta` and `scenes/*.meta` (it only
 normalizes their formatting). Revert them with
 `git checkout -- 'packages/template/src/**.meta'` unless you meant to change
 them.
+
+## Showing the user
+
+Hand off with the editor, not just a file: start `pnpm template:dev` in the
+background and point the user to http://localhost:9000 (Vite picks the next free
+port if 9000 is taken, so read it from the output). It hot-reloads on scene
+edits, so later tweaks show up live. Add an mp4 (`--video` or `--final`) when
+they want something to share.
 
 ## Scene skeleton
 
@@ -88,6 +99,20 @@ export default makeScene2D(function* (view) {
   yield* chain(label().text('Bye', 0.5), waitFor(0.3));
   yield* box().scale(0, 0.4);
 });
+```
+
+Staggering a group, the pattern for most "pop in one by one" effects:
+
+```tsx
+const dots = createRefArray<Circle>();
+view.add(
+  <>
+    {colors.map((color, i) => (
+      <Circle ref={dots} x={-450 + i * 300} size={120} fill={color} scale={0} />
+    ))}
+  </>,
+);
+yield * sequence(0.12, ...dots.map(dot => dot.scale(1, 0.5, easeOutBack)));
 ```
 
 ## Core ideas
@@ -145,7 +170,7 @@ Don't guess. Read the source and the docs:
 ## Gotchas
 
 - Text sizes and positions depend on fonts. Check the rendered frames, don't
-  assume layout.
+  assume layout, and check that text fits its container with some margin.
 - With `layout` on a parent, its children's `x`/`y` are controlled by flexbox.
   Animate `margin`/`padding`/`size` instead, or set `layout={false}` on the
   child.
