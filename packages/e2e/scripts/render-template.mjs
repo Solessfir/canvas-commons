@@ -126,6 +126,10 @@ try {
     previous = files.length;
     await new Promise(r => setTimeout(r, 300));
   }
+  if (args.scene) {
+    // The range end is inclusive, so the next scene's first frame leaks in.
+    files = files.filter(file => basename(dirname(file)) === args.scene);
+  }
 
   if (errors.length > 0) console.error(`Page errors:\n${errors.join('\n')}`);
   console.log(
