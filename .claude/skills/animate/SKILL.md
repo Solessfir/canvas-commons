@@ -32,7 +32,7 @@ pnpm may not be on PATH. If it isn't, use `npx -y pnpm@latest`.
 pnpm --filter @canvas-commons/template exec tsc --noEmit
 
 # Render to PNGs plus a contact sheet (defaults: all scenes, 4 fps, 0.5 scale)
-node packages/e2e/scripts/render-template.mjs [--scene name] [--fps 4] [--scale 0.5] [--no-sheet] [--video]
+node packages/e2e/scripts/render-template.mjs [--scene name] [--fps 4] [--scale 0.5] [--no-sheet] [--video] [--final]
 ```
 
 The script prints the duration, the page errors (so runtime exceptions in a
@@ -46,6 +46,10 @@ individual frames for detail. To check timing precisely, raise the fps; to check
 fine detail, raise the scale to 1. Pass `--video` (with `--fps 30`) to write
 `<scene>.mp4` for the user to watch; it uses `hevc_nvenc` and falls back to
 `libx264`.
+
+`--final` renders an upload master instead: 4K (scale 2), 60 fps, 10-bit HEVC at
+`-cq 16`, no sheet. Use it for YouTube even when the target is 1080p, since
+YouTube gives 4K uploads a higher bitrate.
 
 Requirements: the packages must be built (`pnpm -r build`; the docs build may
 fail without consequence) and Firefox must be installed

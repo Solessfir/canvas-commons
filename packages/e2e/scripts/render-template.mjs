@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Renders the template project to a PNG sequence for previewing animations.
 // Usage: node render-template.mjs [--scene name] [--fps 4] [--scale 0.5]
-//   [--no-sheet] [--video]
+//   [--no-sheet] [--video] [--final]
+// --final renders an upload master: 4K60 10-bit HEVC, no contact sheet.
 import {execFileSync} from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import {createRequire} from 'node:module';
@@ -14,14 +15,25 @@ import {createServer} from 'vite';
 const {values: args} = parseArgs({
   options: {
     scene: {type: 'string'},
-    fps: {type: 'string', default: '4'},
-    scale: {type: 'string', default: '0.5'},
+    fps: {type: 'string'},
+    scale: {type: 'string'},
     'no-sheet': {type: 'boolean', default: false},
     video: {type: 'boolean', default: false},
+    final: {type: 'boolean', default: false},
   },
 });
-const fps = Number(args.fps);
-const resolutionScale = Number(args.scale);
+const fps = Number(args.fps ?? (args.final ? 60 : 4));
+const resolutionScale = Number(args.scale ?? (args.final ? 2 : 0.5));
+const sheet = !args['no-sheet'] && !args.final;
+const video = args.video || args.final;
+// Masters get re-encoded by the platform, so spend bits to keep them clean;
+// 10-bit avoids banding on flat backgrounds and gradients.
+const nvencArgs = args.final
+  ? ['-preset', 'p7', '-tune', 'hq', '-rc', 'vbr', '-cq', '16', '-b:v', '0']
+  : ['-preset', 'p6', '-cq', '20'];
+const nvencFormat = args.final
+  ? ['-profile:v', 'main10', '-pix_fmt', 'p010le']
+  : ['-pix_fmt', 'yuv420p'];
 const maxSheetTiles = 16;
 const sheetColumns = 4;
 
@@ -141,8 +153,8 @@ try {
     const frames = files.filter(file => dirname(file) === sceneDir);
     const input = ['-start_number', basename(frames[0], '.png'), '-i'];
     input.push(resolve(sceneDir, '%06d.png'));
-    if (!args['no-sheet']) {
-      const sheet = `${sceneDir}.sheet.png`;
+    if (sheet) {
+      const sheetFile = `${sceneDir}.sheet.png`;
       const step = Math.ceil(frames.length / maxSheetTiles);
       const tiles = Math.ceil(frames.length / step);
       const rows = Math.ceil(tiles / sheetColumns);
@@ -152,30 +164,38 @@ try {
         `select='not(mod(n\\,${step}))',scale=480:-2,drawtext=text='%{eif\\:n*${step}\\:d}':x=8:y=8:fontsize=24:fontcolor=white:box=1:boxcolor=black@0.6,tile=${sheetColumns}x${rows}:padding=4`,
         '-frames:v',
         '1',
-        sheet,
+        sheetFile,
       ]);
-      console.log(`Sheet: ${sheet} (every ${step} frames)`);
+      console.log(`Sheet: ${sheetFile} (every ${step} frames)`);
     }
-    if (args.video) {
-      const video = `${sceneDir}.mp4`;
-      const output = ['-r', String(fps), '-pix_fmt', 'yuv420p', video];
+    if (video) {
+      const videoFile = `${sceneDir}.mp4`;
+      const output = ['-r', String(fps), videoFile];
       try {
         ffmpeg([
           ...input,
           '-c:v',
           'hevc_nvenc',
-          '-preset',
-          'p6',
-          '-cq',
-          '20',
+          ...nvencArgs,
+          ...nvencFormat,
           '-tag:v',
           'hvc1',
           ...output,
         ]);
       } catch {
-        ffmpeg([...input, '-c:v', 'libx264', '-crf', '20', ...output]);
+        const crf = args.final ? '16' : '20';
+        const format = ['-pix_fmt', 'yuv420p'];
+        ffmpeg([
+          ...input,
+          '-c:v',
+          'libx264',
+          '-crf',
+          crf,
+          ...format,
+          ...output,
+        ]);
       }
-      console.log(`Video: ${video}`);
+      console.log(`Video: ${videoFile}`);
     }
   }
   await browser.close();
