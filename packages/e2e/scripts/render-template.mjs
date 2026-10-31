@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Renders the template project to a PNG sequence for previewing animations.
 // Usage: node render-template.mjs [--scene name] [--fps 4] [--scale 0.5]
-//   [--no-sheet] [--video] [--final]
+//   [--no-sheet] [--video] [--final] [--browser firefox|msedge|chrome|chromium] [--headed] [--webcodecs]
 // --final renders an upload master: 4K60 10-bit HEVC, no contact sheet.
 import {execFileSync} from 'node:child_process';
 import * as fs from 'node:fs/promises';
@@ -9,7 +9,7 @@ import {createRequire} from 'node:module';
 import {basename, dirname, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parseArgs} from 'node:util';
-import {firefox} from 'playwright';
+import {chromium, firefox} from 'playwright';
 import {createServer} from 'vite';
 
 const {values: args} = parseArgs({
@@ -20,6 +20,9 @@ const {values: args} = parseArgs({
     'no-sheet': {type: 'boolean', default: false},
     video: {type: 'boolean', default: false},
     final: {type: 'boolean', default: false},
+    browser: {type: 'string', default: 'firefox'},
+    headed: {type: 'boolean', default: false},
+    webcodecs: {type: 'boolean', default: false},
   },
 });
 const fps = Number(args.fps ?? (args.final ? 60 : 4));
@@ -56,10 +59,27 @@ const server = await createServer({
   // Scene errors still reach the page, where they are collected below.
   logLevel: 'silent',
 }).then(s => s.listen());
-const browserServer = await firefox.launchServer({headless: true});
+// --browser firefox|chromium|msedge|chrome. Headless Edge rendered the same
+// frames ~35% faster than headless Firefox and can decode HEVC footage.
+const browserType = args.browser === 'firefox' ? firefox : chromium;
+const gpuPrefs = {
+  'gfx.webrender.all': true,
+  'layers.acceleration.force-enabled': true,
+  'gfx.canvas.accelerated': true,
+  'media.hardware-video-decoding.force-enabled': true,
+};
+const browserServer = await browserType.launchServer({
+  headless: !args.headed,
+  ...(args.browser === 'firefox'
+    ? {firefoxUserPrefs: args.headed ? gpuPrefs : {}}
+    : {
+        channel: args.browser === 'chromium' ? undefined : args.browser,
+        args: ['--ignore-gpu-blocklist', '--enable-gpu-rasterization'],
+      }),
+});
 
 try {
-  const browser = await firefox.connect(browserServer.wsEndpoint());
+  const browser = await browserType.connect(browserServer.wsEndpoint());
   const page = await browser.newPage();
   const errors = [];
   // Metadata sync with the dev server times out in headless runs; it only
@@ -81,7 +101,9 @@ try {
   // once it lands. Let that happen before rendering.
   await page.goto(url);
   await page.waitForSelector('main', {timeout: 60000});
-  await page.waitForLoadState('networkidle');
+  // Large media (a Video node streaming its file) can keep the network busy
+  // indefinitely, so don't fail when it never goes idle.
+  await page.waitForLoadState('networkidle', {timeout: 15000}).catch(() => {});
   await page.goto(url);
   try {
     await page.waitForFunction(
@@ -94,8 +116,47 @@ try {
     throw error;
   }
 
+  // --webcodecs encodes the mp4 inside the browser instead of writing a PNG per
+  // frame for ffmpeg. Headless Chromium has only software encoders: OpenH264
+  // for H.264 (no HEVC) and libvpx for VP9.
+  const exporter = args.webcodecs
+    ? {
+        name: '@canvas-commons/webcodecs',
+        options: {
+          // Masters go through a near-lossless VP9 intermediate (fixed
+          // quantizer 4, ~170 Mbps) that ffmpeg re-encodes below. Everything
+          // coarser, and every bitrate mode (the only ones OpenH264 offers),
+          // smooths away the grain that dithers dark gradients, and their
+          // banding comes back.
+          videoCodec: args.final ? 'vp9' : 'avc',
+          videoQuality: 'high',
+          quantizer: args.final ? 4 : undefined,
+          keyframeInterval: 2,
+          realtime: !args.final,
+          includeAudio: false,
+          fastStart: true,
+        },
+      }
+    : {
+        name: '@canvas-commons/core/image-sequence',
+        options: {fileType: 'image/png', quality: 100, groupByScene: true},
+      };
+  // The exporter writes `output/<project name>.mp4`, so take the mp4 that
+  // appears there after the render starts.
+  const renderStart = Date.now();
+  const findWebcodecsFile = async () => {
+    const dir = resolve(templateRoot, 'output');
+    for (const entry of await fs.readdir(dir).catch(() => [])) {
+      if (!entry.endsWith('.mp4') || entry.startsWith('.')) continue;
+      const stat = await fs.stat(resolve(dir, entry));
+      if (stat.mtimeMs >= renderStart && stat.size > 0)
+        return resolve(dir, entry);
+    }
+    return null;
+  };
+
   const seconds = await page.evaluate(
-    async ({name, fps, resolutionScale, sceneName}) => {
+    async ({name, fps, resolutionScale, sceneName, exporter}) => {
       await document.fonts.ready;
       const playback = window.commons.player.playback;
       const scenes = playback.onScenesRecalculated.current;
@@ -119,15 +180,83 @@ try {
         fps,
         resolutionScale,
         range,
-        exporter: {
-          name: '@canvas-commons/core/image-sequence',
-          options: {fileType: 'image/png', quality: 100, groupByScene: true},
-        },
+        exporter,
       });
       return Math.min(range[1], playback.duration / playback.fps) - range[0];
     },
-    {name: outputName, fps, resolutionScale, sceneName: args.scene},
+    {name: outputName, fps, resolutionScale, sceneName: args.scene, exporter},
   );
+
+  if (args.webcodecs) {
+    // The exporter uploads the finished mp4 to the dev server after the render
+    // promise settles; wait for it, then put it where the PNG path would.
+    let webcodecsFile = null;
+    for (let i = 0; i < 200 && !webcodecsFile; i++) {
+      webcodecsFile = await findWebcodecsFile();
+      if (!webcodecsFile) await new Promise(r => setTimeout(r, 300));
+    }
+    if (errors.length > 0) console.error(`Page errors:\n${errors.join('\n')}`);
+    if (!webcodecsFile) throw new Error('WebCodecs export produced no file.');
+    const videoFile = resolve(outputDir, `${args.scene ?? outputName}.mp4`);
+    await fs.mkdir(outputDir, {recursive: true});
+    if (args.final) {
+      // 10-bit HEVC at QP 10 keeps the grain (QP 18 already flattens it back
+      // into bands); x264's grain tuning is the CPU fallback.
+      const encode = codecArgs =>
+        execFileSync(
+          ffmpegPath,
+          [
+            '-y',
+            '-loglevel',
+            'error',
+            '-i',
+            webcodecsFile,
+            ...codecArgs,
+            videoFile,
+          ],
+          {stdio: ['ignore', 'ignore', 'pipe']},
+        );
+      try {
+        encode([
+          '-c:v',
+          'hevc_nvenc',
+          '-preset',
+          'p7',
+          '-tune',
+          'hq',
+          '-rc',
+          'constqp',
+          '-qp',
+          '10',
+          '-profile:v',
+          'main10',
+          '-pix_fmt',
+          'p010le',
+          '-tag:v',
+          'hvc1',
+        ]);
+      } catch {
+        encode([
+          '-c:v',
+          'libx264',
+          '-preset',
+          'slow',
+          '-tune',
+          'grain',
+          '-crf',
+          '16',
+        ]);
+      }
+      await fs.rm(webcodecsFile);
+    } else {
+      await fs.rename(webcodecsFile, videoFile);
+    }
+    console.log(`Duration: ${seconds.toFixed(2)}s @ ${fps}fps (WebCodecs)`);
+    console.log(`Video: ${videoFile}`);
+    await browser.close();
+    await Promise.all([server.close(), browserServer.close()]);
+    process.exit(0);
+  }
 
   // Frames are written by the dev server after the render promise settles.
   let previous = -1;
