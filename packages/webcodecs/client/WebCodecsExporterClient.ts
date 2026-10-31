@@ -13,7 +13,7 @@ import {
   ObjectMetaField,
   RendererResult,
 } from '@canvas-commons/core';
-import type {AudioCodec, Quality, VideoCodec} from 'mediabunny';
+import type {AudioCodec, VideoCodec} from 'mediabunny';
 import {
   AudioBufferSource,
   BufferTarget,
@@ -23,6 +23,7 @@ import {
   Mp4OutputFormat,
   NON_PCM_AUDIO_CODECS,
   Output,
+  Quality,
   QUALITY_HIGH,
   QUALITY_LOW,
   QUALITY_MEDIUM,
@@ -34,6 +35,7 @@ import {mixProjectAudio} from './mixAudio';
 const AUDIO_BITRATE = 192_000;
 const AUDIO_CHANNELS = 2;
 const ROUTE = '/__canvas-commons-webcodecs';
+const UPLOAD_CHUNK = 32 * 1024 * 1024;
 
 type QualityName = 'veryLow' | 'low' | 'medium' | 'high' | 'veryHigh';
 
@@ -68,6 +70,13 @@ interface WebCodecsExporterOptions {
   videoQuality: QualityName;
   keyframeInterval: number;
   realtime: boolean;
+  /**
+   * Fixed quantizer instead of the quality preset (H.264/H.265 0-51, VP9 0-63,
+   * lower is better). Bitrate modes let the encoder smooth flat areas, which
+   * wipes out grain that dithers dark gradients and brings their banding back.
+   * Not every encoder supports it: headless Chromium's OpenH264 doesn't.
+   */
+  quantizer?: number;
   audioCodec: AudioCodec;
   fastStart: boolean;
   includeAudio: boolean;
@@ -174,14 +183,17 @@ export class WebCodecsExporterClient implements Exporter {
       videoQuality: opts.videoQuality ?? DEFAULTS.videoQuality,
       keyframeInterval: opts.keyframeInterval ?? DEFAULTS.keyframeInterval,
       realtime: opts.realtime ?? DEFAULTS.realtime,
+      quantizer: opts.quantizer,
       audioCodec: opts.audioCodec ?? DEFAULTS.audioCodec,
       fastStart: opts.fastStart ?? DEFAULTS.fastStart,
       includeAudio: opts.includeAudio ?? DEFAULTS.includeAudio,
       audioSampleRate: opts.audioSampleRate ?? DEFAULTS.audioSampleRate,
     };
     this.quality =
-      QUALITY_PRESETS.find(p => p.value === this.options.videoQuality)
-        ?.quality ?? QUALITY_HIGH;
+      this.options.quantizer !== undefined
+        ? new Quality({quantizer: this.options.quantizer})
+        : (QUALITY_PRESETS.find(p => p.value === this.options.videoQuality)
+            ?.quality ?? QUALITY_HIGH);
     this.fps = settings.fps;
     this.logger = project.logger;
   }
@@ -342,17 +354,27 @@ export class WebCodecsExporterClient implements Exporter {
   }
 
   private async write(buffer: ArrayBuffer): Promise<void> {
-    const response = await fetch(
-      `${ROUTE}/write?name=${encodeURIComponent(this.project.name)}`,
-      {
+    // Upload in chunks: one huge request body breaks tools that mirror requests
+    // (Playwright's CDP pipe can't hold a body over ~512 MB in one message).
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const parts = Math.max(1, Math.ceil(buffer.byteLength / UPLOAD_CHUNK));
+    for (let part = 0; part < parts; part++) {
+      const body = buffer.slice(part * UPLOAD_CHUNK, (part + 1) * UPLOAD_CHUNK);
+      const query = new URLSearchParams({
+        name: this.project.name,
+        id,
+        part: String(part),
+        parts: String(parts),
+      });
+      const response = await fetch(`${ROUTE}/write?${query}`, {
         method: 'POST',
         // eslint-disable-next-line @typescript-eslint/naming-convention
         headers: {'Content-Type': 'application/octet-stream'},
-        body: buffer,
-      },
-    );
-    if (!response.ok) {
-      throw new Error(`Failed to write the output (${response.status}).`);
+        body,
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to write the output (${response.status}).`);
+      }
     }
   }
 }

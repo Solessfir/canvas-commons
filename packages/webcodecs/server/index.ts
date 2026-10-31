@@ -48,18 +48,28 @@ export default (): Plugin => {
         const name = path.basename(url.searchParams.get('name') || 'project');
         const dir = path.resolve(config?.output ?? 'output');
         const finalPath = path.join(dir, `${name}.mp4`);
-        // Per-request temp path so overlapping writes for the same name can't
+        // Chunked uploads share a temp file per upload id; a single-request
+        // upload gets its own, so overlapping writes for the same name can't
         // clobber each other's in-progress file.
+        const id = url.searchParams.get('id')?.replace(/[^\w-]/g, '');
+        const part = Number(url.searchParams.get('part') ?? 0);
+        const parts = Number(url.searchParams.get('parts') ?? 1);
         const tmpPath = path.join(
           dir,
-          `.${name}.${process.pid}-${writeCounter++}.webcodecs.tmp.mp4`,
+          `.${name}.${id ?? `${process.pid}-${writeCounter++}`}.webcodecs.tmp.mp4`,
         );
 
         readBody(req)
           .then(async buffer => {
             await fs.promises.mkdir(dir, {recursive: true});
-            await fs.promises.writeFile(tmpPath, buffer);
-            await fs.promises.rename(tmpPath, finalPath);
+            if (part === 0) {
+              await fs.promises.writeFile(tmpPath, buffer);
+            } else {
+              await fs.promises.appendFile(tmpPath, buffer);
+            }
+            if (part === parts - 1) {
+              await fs.promises.rename(tmpPath, finalPath);
+            }
             res.statusCode = 200;
             res.end(JSON.stringify({output: finalPath}));
           })
