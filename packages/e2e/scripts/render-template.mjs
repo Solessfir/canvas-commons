@@ -212,6 +212,14 @@ try {
             '-i',
             webcodecsFile,
             ...codecArgs,
+            // The browser tags its output with the sRGB transfer, which
+            // YouTube renders with crushed, shifted colors.
+            '-color_primaries',
+            'bt709',
+            '-color_trc',
+            'bt709',
+            '-colorspace',
+            'bt709',
             videoFile,
           ],
           {stdio: ['ignore', 'ignore', 'pipe']},

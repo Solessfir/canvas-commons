@@ -60,8 +60,9 @@ WebCodecs exporter rounds the size down, so `1.3333333333333333` gives an odd
 near-lossless VP9 intermediate (fixed quantizer 4) and ffmpeg re-encodes it to
 10-bit HEVC at QP 10 with NVENC (~43 Mbps). Anything coarser in either step, and
 any bitrate mode, smooths away the grain that dithers dark gradients, so their
-banding comes back. 1440p is still above 1080p, so YouTube gives it the higher
-bitrate.
+banding comes back. The re-encode also retags the video as BT.709: the browser
+tags it with the sRGB transfer, which YouTube renders with crushed, shifted
+colors. 1440p is still above 1080p, so YouTube gives it the higher bitrate.
 
 Requirements: the packages must be built (`pnpm -r build`; the docs build may
 fail without consequence) and Firefox must be installed
